@@ -1,3 +1,3 @@
-module chirpy
+module main
 
-go 1.23.5
+go 1.23.6
