@@ -1,30 +1,60 @@
 package main
 
 import (
+	"database/sql"
+	"fmt"
 	"log"
+	"main/internal/database"
 	"net/http"
-	"strconv"
+	"os"
 	"sync/atomic"
+
+	"github.com/joho/godotenv"
+	_ "github.com/lib/pq"
 )
 
-type apiConfig struct {
-	fileserverHits atomic.Int32
-}
-
 func main() {
+	err := godotenv.Load()
+	if err != nil {
+		fmt.Println("failed to load env file", err)
+		os.Exit(1)
+	}
+
+	dbUrl := os.Getenv("DB_URL")
+	db, err := sql.Open("postgres", dbUrl)
+	if err != nil {
+		fmt.Println("error connecting to database", err)
+		os.Exit(1)
+	}
+
+	secret := os.Getenv("SECRET")
+	dbQueries := database.New(db)
+
+	userPlatform := os.Getenv("PLATFORM")
+	apiCfg := &apiConfig{
+		fileserverHits: atomic.Int32{},
+		queries:        dbQueries,
+		platform:       userPlatform,
+		tokenSecret:    secret,
+	}
+
 	serveMux := http.NewServeMux()
 	filepathRoot := http.Dir(".")
 	strippedFileserver := http.StripPrefix("/app", http.FileServer(filepathRoot))
 	port := "8080"
 
-	apiCfg := &apiConfig{
-		fileserverHits: atomic.Int32{},
-	}
-
 	serveMux.Handle("/app/", apiCfg.middlewareMetricsInc(strippedFileserver))
 	serveMux.HandleFunc("GET /api/healthz", readinessEndpoint)
-	serveMux.HandleFunc("GET /api/metrics", metricsReturn(apiCfg))
-	serveMux.HandleFunc("POST /api/reset", metricsReset(apiCfg))
+	serveMux.HandleFunc("GET /admin/metrics", metricsReturn(apiCfg))
+	serveMux.HandleFunc("POST /admin/reset", reset(apiCfg))
+	serveMux.HandleFunc("POST /api/chirps", apiCfg.createChirpEndpoint)
+	serveMux.HandleFunc("GET /api/chirps", apiCfg.getAllChirpsEndpoint)
+	serveMux.HandleFunc("GET /api/chirps/{chirpID}", apiCfg.getSingleChirp)
+	serveMux.HandleFunc("POST /api/users", apiCfg.createUserEndpoint)
+	serveMux.HandleFunc("POST /api/users", apiCfg.resetCredentials)
+	serveMux.HandleFunc("POST /api/login", apiCfg.loginEndpoint)
+	serveMux.HandleFunc("POST /api/refresh", apiCfg.refreshEndpoint)
+	serveMux.HandleFunc("POST /api/revoke", apiCfg.revokeEndpoint)
 
 	server := &http.Server{
 		Addr:    ":" + port,
@@ -34,34 +64,4 @@ func main() {
 	log.Printf("Serving files from %s on port: %s\n", filepathRoot, port)
 	log.Fatal(server.ListenAndServe())
 
-}
-
-func readinessEndpoint(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(http.StatusText(http.StatusOK)))
-}
-
-func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		cfg.fileserverHits.Add(1)
-		next.ServeHTTP(w, r)
-	})
-}
-
-func metricsReturn(cfg *apiConfig) func(http.ResponseWriter, *http.Request) {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		hits := strconv.Itoa(int(cfg.fileserverHits.Load()))
-		body := "Hits: " + hits
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(body))
-	})
-}
-
-func metricsReset(cfg *apiConfig) func(http.ResponseWriter, *http.Request) {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		cfg.fileserverHits.Swap(0)
-	})
 }
