@@ -7,6 +7,7 @@ import (
 	"main/internal/auth"
 	"main/internal/database"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -186,6 +187,13 @@ func (cfg *apiConfig) getAllChirpsEndpoint(w http.ResponseWriter, r *http.Reques
 			respondWithError(w, 404, "no chirps found by that author")
 			return
 		}
+		sortType := r.URL.Query().Get("sort")
+		if sortType == "desc" {
+			mappedChirps := mapChirps(authorChirps)
+			sort.Slice(mappedChirps, func(i, j int) bool { return mappedChirps[i].Created_at.After(mappedChirps[j].Created_at) })
+			respondWithJSON(w, http.StatusOK, &mappedChirps, make([]string, 0))
+			return
+		}
 		mappedChirps := mapChirps(authorChirps)
 		respondWithJSON(w, http.StatusOK, &mappedChirps, make([]string, 0))
 		return
@@ -194,6 +202,13 @@ func (cfg *apiConfig) getAllChirpsEndpoint(w http.ResponseWriter, r *http.Reques
 	if err != nil {
 		fmt.Println("error pulling chirps", err)
 		w.WriteHeader(500)
+		return
+	}
+	sortType := r.URL.Query().Get("sort")
+	if sortType == "desc" {
+		sort.Slice(allChirps, func(i, j int) bool { return allChirps[i].CreatedAt.After(allChirps[j].CreatedAt) })
+		mappedChirps := mapChirps(allChirps)
+		respondWithJSON(w, http.StatusOK, &mappedChirps, make([]string, 0))
 		return
 	}
 	mappedChirps := mapChirps(allChirps)
