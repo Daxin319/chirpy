@@ -248,6 +248,45 @@ func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
 	})
 }
 
+func (cfg *apiConfig) resetCredentials(w http.ResponseWriter, r *http.Request) {
+	var tokens []string
+	tokenString, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		respondWithError(w, 401, "error getting bearer token")
+	}
+	id, err := auth.ValidateJWT(tokenString, cfg.tokenSecret)
+	if err != nil {
+		respondWithError(w, 401, "unauthorized token")
+	}
+	tokens = append(tokens, tokenString)
+	params := getRequestParams(w, r)
+	hashed_password, err := auth.HashPassword(params.Password)
+	if err != nil {
+		respondWithError(w, 500, "error hashing password")
+	}
+	refresh_token, err := auth.MakeRefreshToken()
+	if err != nil {
+		respondWithError(w, 500, "error generating refresh token")
+	}
+	args := database.CreateRefreshTokenParams{
+		Token:  refresh_token,
+		UserID: id,
+	}
+	_ = cfg.queries.CreateRefreshToken(context.Background(), args)
+	tokens = append(tokens, refresh_token)
+
+	args2 := database.ResetEmailPassParams{
+		ID:             id,
+		Email:          params.Email,
+		HashedPassword: hashed_password,
+	}
+	user, err := cfg.queries.ResetEmailPass(context.Background(), args2)
+	if err != nil {
+		respondWithError(w, 500, "error resetting email and password")
+	}
+	respondWithJSON(w, 200, &user, tokens)
+}
+
 func metricsReturn(cfg *apiConfig) func(http.ResponseWriter, *http.Request) {
 	adminTmpl := template.Must(template.ParseFiles("admin/metrics/index.html"))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
