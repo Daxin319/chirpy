@@ -20,19 +20,26 @@ type apiConfig struct {
 	queries        *database.Queries
 	platform       string
 	tokenSecret    string
+	polkaKey       string
 }
 
 type hitCounter struct {
 	Hits string
 }
 
+type webhookData struct {
+	UserID uuid.UUID `json:"user_id"`
+}
+
 type parameters struct {
-	Body             string    `json:"body"`
-	Email            string    `json:"email"`
-	Password         string    `json:"password"`
-	UserID           uuid.UUID `json:"user_id"`
-	ChirpID          uuid.UUID `json:"chirp_id"`
-	ExpiresInSeconds int       `json:"expires_in_seconds"`
+	Body             string      `json:"body"`
+	Email            string      `json:"email"`
+	Password         string      `json:"password"`
+	UserID           uuid.UUID   `json:"user_id"`
+	ChirpID          uuid.UUID   `json:"chirp_id"`
+	ExpiresInSeconds int         `json:"expires_in_seconds"`
+	Event            string      `json:"event"`
+	Data             webhookData `json:"data"`
 }
 
 type Token struct {
@@ -55,6 +62,7 @@ type User struct {
 	Hashed_password string    `json:"hashed_password"`
 	Token           string    `json:"token"`
 	Refresh_token   string    `json:"refresh_token"`
+	Is_chirpy_red   bool      `json:"is_chirpy_red"`
 }
 
 type returnVals struct {
@@ -82,10 +90,12 @@ func (cfg *apiConfig) createChirpEndpoint(w http.ResponseWriter, r *http.Request
 	token, err := auth.GetBearerToken(r.Header)
 	if err != nil {
 		respondWithError(w, 500, "error getting bearer token")
+		return
 	}
 	id, err := auth.ValidateJWT(token, cfg.tokenSecret)
 	if err != nil {
 		respondWithError(w, 401, "unauthorized request")
+		return
 	}
 	args := database.CreateChirpParams{
 		Body:   params.cleanInput().Body,
@@ -96,14 +106,17 @@ func (cfg *apiConfig) createChirpEndpoint(w http.ResponseWriter, r *http.Request
 
 	if len(params.Body) > 140 {
 		respondWithError(w, 400, "chirp too long")
+		return
 	} else if len(params.Body) == 0 {
 		respondWithError(w, 400, "cannot send empty chirp")
+		return
 	} else {
 
 		chirp, err := cfg.queries.CreateChirp(context.Background(), args)
 		if err != nil {
 			fmt.Println("error creating chirp", err)
 			w.WriteHeader(500)
+			return
 		}
 		respondWithJSON(w, http.StatusCreated, &chirp, make([]string, 0))
 	}
@@ -135,8 +148,48 @@ func (cfg *apiConfig) createUserEndpoint(w http.ResponseWriter, r *http.Request)
 	respondWithJSON(w, http.StatusCreated, &user, make([]string, 0))
 }
 
+func (cfg *apiConfig) upgradeUserEndpoint(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	apiKey, err := auth.GetApiKey(r.Header)
+	if err != nil {
+		respondWithError(w, 401, "no api key provided")
+		return
+	}
+	if apiKey != cfg.polkaKey {
+		respondWithError(w, 401, "invalid api key")
+		return
+	}
+	params := getRequestParams(w, r)
+	if params.Event == "user.upgraded" {
+		err := cfg.queries.UpgradeUser(context.Background(), params.Data.UserID)
+		if err != nil {
+			respondWithError(w, 404, "user not found")
+			return
+		}
+		respondWithJSON(w, 204, "", make([]string, 0))
+		return
+	}
+	respondWithJSON(w, 204, "", make([]string, 0))
+}
+
 func (cfg *apiConfig) getAllChirpsEndpoint(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
+	author := r.URL.Query().Get("author_id")
+	if len(author) > 0 {
+		authorID, err := uuid.Parse(author)
+		if err != nil {
+			respondWithError(w, 401, "unable to parse author ID")
+			return
+		}
+		authorChirps, err := cfg.queries.GetChirpsByAuthor(context.Background(), authorID)
+		if err != nil {
+			respondWithError(w, 404, "no chirps found by that author")
+			return
+		}
+		mappedChirps := mapChirps(authorChirps)
+		respondWithJSON(w, http.StatusOK, &mappedChirps, make([]string, 0))
+		return
+	}
 	allChirps, err := cfg.queries.GetAllChirps(context.Background())
 	if err != nil {
 		fmt.Println("error pulling chirps", err)
@@ -165,6 +218,43 @@ func (cfg *apiConfig) getSingleChirp(w http.ResponseWriter, r *http.Request) {
 	respondWithJSON(w, http.StatusOK, &data, make([]string, 0))
 }
 
+func (cfg *apiConfig) deleteChirp(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	tokenString, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		respondWithError(w, 401, "error getting bearer token")
+		return
+	}
+	requestUserId, err := auth.ValidateJWT(tokenString, cfg.tokenSecret)
+	if err != nil {
+		respondWithError(w, 403, "unauthorized token")
+		return
+	}
+	chirpID := r.PathValue("chirpID")
+	parsedID, err := uuid.Parse(chirpID)
+	if err != nil {
+		respondWithError(w, 404, "chirp does not exist")
+		return
+	}
+	target, err := cfg.queries.GetOneChirp(context.Background(), parsedID)
+	if err != nil {
+		fmt.Println("chirp not found", err)
+		w.WriteHeader(404)
+		return
+	}
+	if requestUserId != target.UserID {
+		respondWithError(w, 403, "users may only delete their own chirps")
+		return
+	}
+	err = cfg.queries.DeleteChirp(context.Background(), parsedID)
+	if err != nil {
+		respondWithError(w, 500, "error deleting chirp")
+		return
+	}
+	respondWithJSON(w, 204, chirpID, make([]string, 0))
+}
+
 func (cfg *apiConfig) loginEndpoint(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	params := getRequestParams(w, r)
@@ -178,16 +268,19 @@ func (cfg *apiConfig) loginEndpoint(w http.ResponseWriter, r *http.Request) {
 	err = auth.CheckPasswordHash(params.Password, user.HashedPassword)
 	if err != nil {
 		respondWithError(w, 401, "invalid email or password")
+		return
 	} else {
 		var tokens []string
 		token, err := auth.MakeJWT(user.ID, cfg.tokenSecret, 1*time.Hour)
 		if err != nil {
 			respondWithError(w, 500, "error creating JWT")
+			return
 		}
 		tokens = append(tokens, token)
 		refresh_token, err := auth.MakeRefreshToken()
 		if err != nil {
 			respondWithError(w, 500, "error generating refresh token")
+			return
 		}
 		args := database.CreateRefreshTokenParams{
 			Token:  refresh_token,
@@ -206,21 +299,26 @@ func (cfg *apiConfig) refreshEndpoint(w http.ResponseWriter, r *http.Request) {
 	tokenString, err := auth.GetBearerToken(r.Header)
 	if err != nil {
 		respondWithError(w, 500, "error getting bearer token")
+		return
 	}
 	validated, err := cfg.queries.ValidateRefreshToken(context.Background(), tokenString)
 	if err != nil {
 		respondWithError(w, 401, "unauthorized token")
+		return
 	}
 	if validated.RevokedAt.Valid {
 		respondWithError(w, 401, "expired token")
+		return
 	}
 	user, err := cfg.queries.GetUserFromRefreshToken(context.Background(), validated.Token)
 	if err != nil {
 		respondWithError(w, 500, "error getting user data from database")
+		return
 	}
 	newTokenString, err := auth.MakeJWT(user.ID, cfg.tokenSecret, 1*time.Hour)
 	if err != nil {
 		respondWithError(w, 500, "error creating auth token")
+		return
 	}
 	tokenStruct := Token{
 		TokenString: newTokenString,
@@ -232,10 +330,12 @@ func (cfg *apiConfig) revokeEndpoint(w http.ResponseWriter, r *http.Request) {
 	tokenString, err := auth.GetBearerToken(r.Header)
 	if err != nil {
 		respondWithError(w, 500, "error getting bearer token")
+		return
 	}
 	validated, err := cfg.queries.ValidateRefreshToken(context.Background(), tokenString)
 	if err != nil {
 		respondWithError(w, 401, "unauthorized token")
+		return
 	}
 	_ = cfg.queries.RevokeToken(context.Background(), validated.Token)
 	respondWithJSON(w, 204, validated.Token, make([]string, 0))
@@ -253,20 +353,24 @@ func (cfg *apiConfig) resetCredentials(w http.ResponseWriter, r *http.Request) {
 	tokenString, err := auth.GetBearerToken(r.Header)
 	if err != nil {
 		respondWithError(w, 401, "error getting bearer token")
+		return
 	}
 	id, err := auth.ValidateJWT(tokenString, cfg.tokenSecret)
 	if err != nil {
 		respondWithError(w, 401, "unauthorized token")
+		return
 	}
 	tokens = append(tokens, tokenString)
 	params := getRequestParams(w, r)
 	hashed_password, err := auth.HashPassword(params.Password)
 	if err != nil {
 		respondWithError(w, 500, "error hashing password")
+		return
 	}
 	refresh_token, err := auth.MakeRefreshToken()
 	if err != nil {
 		respondWithError(w, 500, "error generating refresh token")
+		return
 	}
 	args := database.CreateRefreshTokenParams{
 		Token:  refresh_token,

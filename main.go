@@ -28,6 +28,7 @@ func main() {
 	}
 
 	secret := os.Getenv("SECRET")
+	polkaSecret := os.Getenv("POLKA_KEY")
 	dbQueries := database.New(db)
 
 	userPlatform := os.Getenv("PLATFORM")
@@ -36,6 +37,7 @@ func main() {
 		queries:        dbQueries,
 		platform:       userPlatform,
 		tokenSecret:    secret,
+		polkaKey:       polkaSecret,
 	}
 
 	serveMux := http.NewServeMux()
@@ -50,8 +52,10 @@ func main() {
 	serveMux.HandleFunc("POST /api/chirps", apiCfg.createChirpEndpoint)
 	serveMux.HandleFunc("GET /api/chirps", apiCfg.getAllChirpsEndpoint)
 	serveMux.HandleFunc("GET /api/chirps/{chirpID}", apiCfg.getSingleChirp)
+	serveMux.HandleFunc("DELETE /api/chirps/{chirpID}", apiCfg.deleteChirp)
 	serveMux.HandleFunc("POST /api/users", apiCfg.createUserEndpoint)
 	serveMux.HandleFunc("PUT /api/users", apiCfg.resetCredentials)
+	serveMux.HandleFunc("POST /api/polka/webhooks", apiCfg.upgradeUserEndpoint)
 	serveMux.HandleFunc("POST /api/login", apiCfg.loginEndpoint)
 	serveMux.HandleFunc("POST /api/refresh", apiCfg.refreshEndpoint)
 	serveMux.HandleFunc("POST /api/revoke", apiCfg.revokeEndpoint)

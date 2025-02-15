@@ -75,10 +75,11 @@ func respondWithJSON(w http.ResponseWriter, code int, payload interface{}, token
 		w.Write(data)
 	case *database.User:
 		user := User{
-			ID:         v.ID,
-			Created_at: v.CreatedAt,
-			Updated_at: v.UpdatedAt,
-			Email:      v.Email,
+			ID:            v.ID,
+			Created_at:    v.CreatedAt,
+			Updated_at:    v.UpdatedAt,
+			Email:         v.Email,
+			Is_chirpy_red: v.IsChirpyRed.Bool,
 		}
 
 		if len(tokens) == 2 {
